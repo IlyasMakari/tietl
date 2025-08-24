@@ -1,0 +1,150 @@
+import pendulum
+from airflow.decorators import dag, task
+from pendulum import datetime
+import asyncio
+import os
+from telethon import TelegramClient
+import sys
+
+from airflow.exceptions import AirflowSkipException
+
+from include.filesystem import get_fs
+from include.telegram.telegram_scraper import scrape_messages, create_chat_archive, list_chat_archives
+from include.elasticsearch.elasticsearch import create_index_if_not_exists, bulk_insert
+
+import re
+import yaml
+import pendulum
+import pandas as pd
+# import dask.dataframe as dd
+
+# Path to YAML configs
+CONFIG_DIR = os.path.join(os.path.dirname(__file__), "telegram_chats")
+
+def create_telegram_dag(dag_id, config):
+    """Factory that returns a DAG for one Telegram chat"""
+
+    schedule = config.get("schedule_interval", "@daily")
+
+    default_args = config.get("default_args", {"retries": 0})
+    params = config.get("params", {})
+
+    chat_entity = params["chat_entity"]
+    chat_type = params["chat_type"]
+    chat_id = params["chat_id"]
+
+    @dag(dag_display_name="My Telegram Chat Scraper", schedule=schedule, start_date=datetime(2023, 1, 1), catchup=False, tags=['telegram', 'infostealer'], default_args=default_args)
+    def scrape_telegram_chat():
+
+        @task()
+        def fetch_and_archive_messages(**kwargs):
+
+            logical_date = kwargs['logical_date']
+            previous_task_date = logical_date.subtract(days=1)
+
+            # Telegram link
+            chat_entity = "https://t.me/+-nvMIBkz7V4xMzcy"
+            chat_type = "Channel"
+            chat_id = "1813631420"
+
+            # Scrape messages from the Telegram chat
+            try:
+
+                chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date))
+                print("Scraping succeeded!")
+
+            except Exception as e:
+                print(f"Error scraping: {e}")
+                print("Falling back to archive if available.")
+                parquet_files = list_chat_archives(
+                    chat_type=chat_type,
+                    chat_id=chat_id,
+                    start_date=previous_task_date,
+                    end_date=logical_date
+                )
+                print(f"Found {len(parquet_files)} archived files matching the criteria.")
+                print(f"Parquet files: {parquet_files}")
+                if parquet_files:
+                    return {
+                        "parquet_files": parquet_files,
+                        "logical_date": logical_date,
+                        "previous_task_date": previous_task_date
+                    }
+                else:
+                    raise Exception("No scraped data or archive available.")
+
+            # If chat is empty, skip the task
+            if not chat.get("chat_history", []):
+                raise AirflowSkipException("No messages found in the chat. Skipping task.")
+                
+            parquet_files = create_chat_archive(chat, fs=get_fs())
+
+            return {
+                "parquet_files": parquet_files,
+                "logical_date": logical_date,
+                "previous_task_date": previous_task_date
+            }
+
+
+        @task()
+        def save_to_elasticsearch(data):
+
+            parquet_files = data["parquet_files"]
+            logical_date = data["logical_date"]
+            previous_task_date = data["previous_task_date"]
+
+            df = pd.read_parquet(parquet_files, engine="pyarrow", filesystem=get_fs())
+
+            # print dataframe info
+            print(f"Dataframe length: {len(df)}")
+
+            # Filter dataframe to only include messages within the date range
+            df["message_date"] = pd.to_datetime(df["message_date"], utc=True, format='ISO8601')
+            df = df[(df["message_date"] >= previous_task_date) & (df["message_date"] <= logical_date)]
+            print(f"Dataframe length after filtering date: {len(df)}")
+
+            # Deduplicate based on chat_type, chat_id, id keeping the latest archive_date
+            df["archive_date"] = pd.to_datetime(df["archive_date"], utc=True, format='ISO8601')
+            df = df.sort_values(by="archive_date", ascending=False)
+            latest_archive_idx = df.groupby(["chat_type", "chat_id", "id"])["archive_date"].idxmax()
+            df = df.loc[latest_archive_idx].reset_index(drop=True)
+            print(f"Dataframe length after deduplication: {len(df)}")
+
+            # add save date columns
+            df["es_logical_save_date"] = logical_date.to_iso8601_string()
+            df["es_save_date"] = pendulum.now("UTC").to_iso8601_string()
+
+            # Add the _id field for Elasticsearch based on chat_type, chat_id, id
+            df["_id"] = df.apply(lambda row: f"{row['chat_type']}_{row['chat_id']}_{row['id']}", axis=1)
+
+            # Create index if it doesn't exist
+            index_name = "telegram_messages"
+            mapping_file = "/usr/local/airflow/include/elasticsearch/mappings/telegram_messages.json"
+            create_index_if_not_exists(index_name, mapping_file)
+
+            for col in ['fwd_from_id', 'file_size_bytes', 'reply_to_msg_id', 'fwd_from_channel_post']:
+                df[col] = df[col].astype('Int64')  # nullable integer type
+
+            # Bulk insert into Elasticsearch
+            bulk_insert(df, index_name=index_name, id_field="_id")
+
+
+
+
+        # DAG flow
+        archive_data = fetch_and_archive_messages()
+        save_to_elasticsearch(archive_data)
+
+
+    # Instantiate the DAG
+    return scrape_telegram_chat()
+
+
+
+# ---- Load YAMLs and register DAGs ----
+for file in os.listdir(CONFIG_DIR):
+    if file.endswith(".yaml") or file.endswith(".yml"):
+        with open(os.path.join(CONFIG_DIR, file), "r") as f:
+            yaml_content = yaml.safe_load(f)
+            for dag_id, dag_config in yaml_content.items():
+                globals()[dag_id] = create_telegram_dag(dag_id, dag_config)

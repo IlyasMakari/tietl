@@ -1,0 +1,64 @@
+version: "3.8"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.1.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - es_net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.1.1
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - es_net
+    depends_on:
+      - elasticsearch
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    networks:
+      - app_net
+
+  test:
+    build: ./test
+    container_name: tietl-test
+    volumes:
+      - ./test:/app
+    networks:
+      - es_net 
+      - app_net
+    depends_on:
+      - elasticsearch
+
+volumes:
+  minio_data:
+  es_data:
+
+networks:
+  es_net:
+    driver: bridge
+  app_net:
+    driver: bridge

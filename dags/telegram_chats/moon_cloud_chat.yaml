@@ -1,0 +1,15 @@
+moon_cloud_chat:
+  default_args:
+    owner: "airflow"
+    retries: 0
+  start_date: 2023-01-01
+  schedule_interval: "@daily"
+  catchup: false
+  dagrun_timeout: 3600
+  description: "Scrape messages from Telegram Group 1"
+  max_active_runs: 1
+  tags: ["telegram", "infostealer"]
+  params:
+    chat_entity: "https://t.me/+-nvMIBkz7V4xMzcy"
+    chat_type: "Channel"
+    chat_id: "1813631420"

@@ -1,0 +1,42 @@
+{
+  "mappings": {
+    "properties": {
+      "id": {"type": "long"},
+      "text": {"type": "text"},
+      "from_id": {"type": "long"},
+      "file_name": {"type": "wildcard"},
+      "file_mime_type": {"type": "keyword"},
+      "file_size_bytes": {"type": "double"},
+      "from_type": {"type": "keyword"},
+      "sender_id": {"type": "long"},
+      "grouped_id": {"type": "long"},
+      "fwd_from_id": {"type": "long"},
+      "message_date": {"type": "date"},
+      "from_username": {"type": "keyword"},
+      "fwd_from_date": {"type": "date"},
+      "fwd_from_name": {"type": "keyword"},
+      "fwd_from_type": {"type": "keyword"},
+      "from_last_name": {"type": "keyword"},
+      "from_first_name": {"type": "keyword"},
+      "reply_to_msg_id": {"type": "long"},
+      "fwd_from_username": {"type": "keyword"},
+      "from_channel_title": {"type": "text"},
+      "fwd_from_last_name": {"type": "keyword"},
+      "fwd_from_first_name": {"type": "keyword"},
+      "fwd_from_post_author": {"type": "keyword"},
+      "fwd_from_channel_post": {"type": "long"},
+      "fwd_from_channel_title": {"type": "text"},
+      "chat_name": {"type": "text"},
+      "chat_type": {"type": "keyword"},
+      "chat_id": {"type": "long"},
+      "entity_id": {"type": "keyword"},
+      "archive_date": {"type": "date"},
+      "es_logical_save_date": {"type": "date"},
+      "es_save_date": {"type": "date"},
+      "is_broadcast": {"type": "boolean"},
+      "is_megagroup": {"type": "boolean"},
+      "is_gigagroup": {"type": "boolean"},
+      "participants_count": {"type": "integer"}
+    }
+  }
+}
