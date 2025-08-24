@@ -1,15 +1,28 @@
 moon_cloud_chat:
   default_args:
-    owner: "airflow"
     retries: 0
-  start_date: 2023-01-01
+  start_date: "2023-01-01"
   schedule_interval: "@daily"
   catchup: false
-  dagrun_timeout: 3600
-  description: "Scrape messages from Telegram Group 1"
-  max_active_runs: 1
-  tags: ["telegram", "infostealer"]
-  params:
+  tags: ["telegram", "infostealer", "chatrooms"]
+  chat_info:
+    chat_name: "Moon Chat (Ru&Eng)"
     chat_entity: "https://t.me/+-nvMIBkz7V4xMzcy"
     chat_type: "Channel"
     chat_id: "1813631420"
+
+moon_cloud_free_logs:
+  default_args:
+    retries: 0
+  start_date: "2023-01-01"
+  schedule_interval: "@daily"
+  catchup: false
+  tags: ["telegram", "infostealer", "chatrooms"]
+  chat_info:
+    chat_name: "Moon Cloud Free Logs"
+    chat_entity: "https://t.me/+5IFts3LVJmhmMzZi"
+    chat_type: "Channel"
+    chat_id: "1711284206"
+
+
+

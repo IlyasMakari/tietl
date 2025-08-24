@@ -1,6 +1,7 @@
 import pendulum
 from airflow.decorators import dag, task
 from pendulum import datetime
+from datetime import datetime, timedelta
 import asyncio
 import os
 from telethon import TelegramClient
@@ -25,15 +26,22 @@ def create_telegram_dag(dag_id, config):
     """Factory that returns a DAG for one Telegram chat"""
 
     schedule = config.get("schedule_interval", "@daily")
-
+    start_date = pendulum.parse(config.get("start_date", "2023-01-01"))
     default_args = config.get("default_args", {"retries": 0})
-    params = config.get("params", {})
+    chat_info = config.get("chat_info", {})
+    chat_entity = chat_info.get("chat_entity", "")
+    chat_type = chat_info.get("chat_type", "")
+    chat_id = chat_info.get("chat_id", "")
+    chat_name = chat_info.get("chat_name", "")
+    dag_name = config.get("dag_name", chat_name + " - Telegram Chat Scraper")
+    dag_description = config.get("dag_description", "Scrape messages from " + chat_name)
+    catchup = config.get("catchup", False)
+    tags = config.get("tags", ["telegram", "chatrooms"])
+    dagrun_timeout = config.get("dagrun_timeout_minutes", None)
+    if dagrun_timeout:
+        dagrun_timeout = timedelta(minutes=dagrun_timeout)
 
-    chat_entity = params["chat_entity"]
-    chat_type = params["chat_type"]
-    chat_id = params["chat_id"]
-
-    @dag(dag_display_name="My Telegram Chat Scraper", schedule=schedule, start_date=datetime(2023, 1, 1), catchup=False, tags=['telegram', 'infostealer'], default_args=default_args)
+    @dag(dag_id=dag_id, dagrun_timeout=dagrun_timeout, dag_display_name=dag_name, description=dag_description, schedule=schedule, start_date=start_date, catchup=catchup, tags=tags, default_args=default_args)
     def scrape_telegram_chat():
 
         @task()
@@ -42,14 +50,8 @@ def create_telegram_dag(dag_id, config):
             logical_date = kwargs['logical_date']
             previous_task_date = logical_date.subtract(days=1)
 
-            # Telegram link
-            chat_entity = "https://t.me/+-nvMIBkz7V4xMzcy"
-            chat_type = "Channel"
-            chat_id = "1813631420"
-
             # Scrape messages from the Telegram chat
             try:
-
                 chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date))
                 print("Scraping succeeded!")
 
@@ -127,9 +129,6 @@ def create_telegram_dag(dag_id, config):
 
             # Bulk insert into Elasticsearch
             bulk_insert(df, index_name=index_name, id_field="_id")
-
-
-
 
         # DAG flow
         archive_data = fetch_and_archive_messages()
