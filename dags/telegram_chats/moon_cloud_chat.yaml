@@ -23,6 +23,7 @@ moon_cloud_free_logs:
     chat_entity: "https://t.me/+5IFts3LVJmhmMzZi"
     chat_type: "Channel"
     chat_id: "1711284206"
-
-
-
+  enable_downloads: True
+  download_rules:
+    min_bytes: 1024
+    max_bytes: 314572800

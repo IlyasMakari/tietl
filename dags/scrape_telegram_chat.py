@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import asyncio
 import os
 from telethon import TelegramClient
+from telethon.errors.rpcerrorlist import InviteHashExpiredError
 import sys
 
 from airflow.exceptions import AirflowSkipException
@@ -18,6 +19,7 @@ import yaml
 import pendulum
 import pandas as pd
 # import dask.dataframe as dd
+
 
 # Path to YAML configs
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "telegram_chats")
@@ -41,6 +43,9 @@ def create_telegram_dag(dag_id, config):
     if dagrun_timeout:
         dagrun_timeout = timedelta(minutes=dagrun_timeout)
 
+    enable_downloads = config.get("enable_downloads", False)
+    download_rules = config.get("download_rules", {})
+
     @dag(dag_id=dag_id, dagrun_timeout=dagrun_timeout, dag_display_name=dag_name, description=dag_description, schedule=schedule, start_date=start_date, catchup=catchup, tags=tags, default_args=default_args)
     def scrape_telegram_chat():
 
@@ -52,10 +57,10 @@ def create_telegram_dag(dag_id, config):
 
             # Scrape messages from the Telegram chat
             try:
-                chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date))
+                chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date, fs=get_fs(), download_files=enable_downloads, download_rules=download_rules))
                 print("Scraping succeeded!")
 
-            except Exception as e:
+            except InviteHashExpiredError as e:
                 print(f"Error scraping: {e}")
                 print("Falling back to archive if available.")
                 parquet_files = list_chat_archives(

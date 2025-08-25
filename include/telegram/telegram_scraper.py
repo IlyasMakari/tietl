@@ -8,10 +8,12 @@ import pandas as pd
 import datetime
 import fsspec
 import re
+import hashlib
+import shutil
 
 from include.filesystem import get_fs
 
-def create_message_summary(message, from_entity, fwd_from_entity):
+def create_message_summary(message, from_entity, fwd_from_entity, file_hash=None):
 
     return {
 
@@ -40,6 +42,7 @@ def create_message_summary(message, from_entity, fwd_from_entity):
         "file_name": getattr(message.file, "name", None) if message.file else None,
         "file_size_bytes": getattr(message.file, "size", None) if message.file else None,
         "file_mime_type": getattr(message.file, "mime_type", None) if message.file else None,
+        "file_hash_sha256": file_hash,
 
         "reply_to_msg_id": getattr(message.reply_to, "reply_to_msg_id", None) if message.reply_to else None,
 
@@ -95,13 +98,92 @@ def create_chat_archive(chat, fs, file_location="telegram_chat_archives"):
     return [file_path]
 
 
-async def scrape_messages(chat_entity_id, start_time, end_time):
-    
+
+def human_bytes(n):
+    if n is None:
+        return "?"
+    units = ["B","KB","MB","GB","TB","PB"]
+    i = 0
+    n = float(n)
+    while n >= 1024 and i < len(units) - 1:
+        n /= 1024
+        i += 1
+    return f"{n:.1f} {units[i]}"
+
+def progress_text(done, total):
+    pct = (done / total * 100) if total else 0
+    s = f"{human_bytes(done)} / {human_bytes(total)}  ({pct:.1f}%)"
+    print("\r" + s, end="", flush=True)
+    return "⬇️ " + s
+
+
+def _should_download(message, from_entity, rules):
+    if not rules:
+        return True
+
+    file = message.file
+    text = message.text or ""
+    username = getattr(from_entity, "username", None)
+
+    # MIME types
+    if "allowed_mime_types" in rules:
+        allowed = rules["allowed_mime_types"]
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        if file.mime_type not in allowed:
+            return False
+
+    # Filename regex
+    if "name_regex" in rules and file.name:
+        if not re.search(rules["name_regex"], file.name):
+            return False
+
+    # Username
+    if "username" in rules and username:
+        if username != rules["username"]:
+            return False
+
+    # Text regex
+    if "text_regex" in rules:
+        if not re.search(rules["text_regex"], text):
+            return False
+
+    # Size constraints
+    if "min_bytes" in rules and file.size:
+        if file.size < rules["min_bytes"]:
+            return False
+    if "max_bytes" in rules and file.size:
+        if file.size > rules["max_bytes"]:
+            return False
+
+    return True
+
+def sha256sum(filename):
+    h = hashlib.sha256()
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+async def init_telegram_client():
     api_id = os.getenv('TELEGRAM_API_ID')
     api_hash = os.getenv('TELEGRAM_API_HASH')
-    client = TelegramClient("/usr/local/airflow/telethon_sessions/tietle.session", api_id, api_hash)
+    client = TelegramClient(
+        "/usr/local/airflow/telethon_sessions/tietl.session",
+        api_id,
+        api_hash
+    )
     await client.start()
+    return client
 
+
+async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, download_location="telegram_downloads", download_files=False, download_rules=None):
+    
+    # If downloads true, make sure fs is set
+    if download_files and fs is None:
+        raise ValueError("File system (fs) must be set when download_files is True")
+
+    client = await init_telegram_client()
     chat = await client.get_entity(chat_entity_id)
 
     chat_history = []  # store messages for export
@@ -123,7 +205,72 @@ async def scrape_messages(chat_entity_id, start_time, end_time):
         except Exception:
             fwd_from_entity = None
 
-        chat_history.append(create_message_summary(message, from_entity, fwd_from_entity))
+        file_hash = None
+        msg_summary = None
+        local_path = None
+
+        try:
+            if download_files and message.file and getattr(message.file, "name", None):
+                if _should_download(message, from_entity, download_rules):
+                    print(f"Found media '{message.file.name}', starting fast download...")
+                    progress_msg = await client.send_message("me", "Starting…")
+                    local_path = await fast_download(
+                        client=client,
+                        msg=message,
+                        reply=progress_msg,
+                        progress_bar_function=progress_text
+                    )
+                    print(f"Downloaded to: {local_path}")
+
+                    # Calculate SHA256 hash
+                    file_hash = sha256sum(local_path)
+
+                    # Create message summary
+                    msg_summary = create_message_summary(message, from_entity, fwd_from_entity, file_hash=file_hash)
+
+                    # Build S3 path
+                    storage_location = os.getenv('STORAGE_LOCATION', 's3://tietl')
+                    s3_dir = f"{storage_location.rstrip('/')}/{download_location.rstrip('/')}/{file_hash}"
+                    s3_file_path = f"{s3_dir}/file/{message.file.name}"
+                    s3_source_file_path = f"{s3_dir}/source_{message.date.isoformat()}.json"
+
+                    # Check if already exists in S3
+                    first_download = False
+                    if not fs.exists(s3_dir):
+                        print(f"Uploading to {s3_file_path}")
+                        with fs.open(s3_file_path, "wb") as f:
+                            with open(local_path, "rb") as lf:
+                                shutil.copyfileobj(lf, f)
+                                first_download = True
+                    else:
+                        print(f"Skipping upload, already exists in {s3_dir}")
+
+                    source_json = {
+                        "file_hash": file_hash,
+                        "file_name": getattr(message.file, "name", None),
+                        "file_size_bytes": getattr(message.file, "size", None),
+                        "mime_type": getattr(message.file, "mime_type", None),
+                        "source_type": "telegram_message",
+                        "source_date": message.date.isoformat(),
+                        "source_data": msg_summary,
+                        "first_download": first_download
+                    }
+
+                    with fs.open(s3_source_file_path, "w") as f:
+                        json.dump(source_json, f, indent=2)
+                    print(f"Uploaded source JSON to {s3_source_file_path}")
+
+                    # Cleanup local file
+                    os.remove(local_path)
+
+        except Exception as e:  # catch anything that goes wrong during download
+            print(f"Error downloading file: {e}")
+            raise
+        finally:
+            if local_path and os.path.exists(local_path):
+                os.remove(local_path)
+
+        chat_history.append(create_message_summary(message, from_entity, fwd_from_entity, file_hash))
 
     return {
         "start_time": start_time,
