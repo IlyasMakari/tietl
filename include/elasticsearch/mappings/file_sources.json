@@ -1,0 +1,22 @@
+{
+  "mappings": {
+    "properties": {
+        "file_hash": {"type": "keyword"},
+        "file_name": {
+            "type": "keyword",
+            "fields": {
+                "text": {
+                "type": "text"
+                }
+            }
+        },
+        "file_size_bytes": {"type": "double"},
+        "mime_type": {"type": "keyword"},
+        "source_type": {"type": "keyword"},
+        "source_date": {"type": "date"},
+        "archive_date": {"type": "date"},
+        "source_data": {"type": "flattened"},
+        "first_download": {"type": "boolean"}
+    }
+  }
+}

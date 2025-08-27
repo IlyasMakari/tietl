@@ -13,12 +13,21 @@ import shutil
 
 from include.filesystem import get_fs
 
-def create_message_summary(message, from_entity, fwd_from_entity, file_hash=None):
+def create_message_summary(message, chat, chat_entity_id, from_entity, fwd_from_entity, file_hash=None):
 
     return {
 
-        "id": message.id,
+        "chat_title": chat.title,
+        "chat_id": chat.id,
+        "entity_id": chat_entity_id,
+        "chat_type": type(chat).__name__,
+        "message_id": message.id,
         "grouped_id": message.grouped_id,
+        "is_broadcast": getattr(chat, "broadcast", False),
+        "is_megagroup": getattr(chat, "megagroup", False),
+        "is_gigagroup": getattr(chat, "gigagroup", False),
+        "participants_count": getattr(chat, "participants_count", None),
+
         "from_type": (
           "Channel" if getattr(message.from_id, "channel_id", None) is not None else
           "User" if getattr(message.from_id, "user_id", None) is not None else
@@ -42,7 +51,7 @@ def create_message_summary(message, from_entity, fwd_from_entity, file_hash=None
         "file_name": getattr(message.file, "name", None) if message.file else None,
         "file_size_bytes": getattr(message.file, "size", None) if message.file else None,
         "file_mime_type": getattr(message.file, "mime_type", None) if message.file else None,
-        "file_hash_sha256": file_hash,
+        "file_hash": file_hash,
 
         "reply_to_msg_id": getattr(message.reply_to, "reply_to_msg_id", None) if message.reply_to else None,
 
@@ -72,17 +81,10 @@ def create_message_summary(message, from_entity, fwd_from_entity, file_hash=None
     }
 
 
+
 def create_chat_archive(chat, fs, file_location="telegram_chat_archives"):
     df_messages = pd.DataFrame(chat["chat_history"])
-    df_messages["chat_name"] = chat["chat_title"]
-    df_messages["chat_type"] = chat["chat_type"]
-    df_messages["chat_id"] = chat["chat_id"]
-    df_messages["entity_id"] = chat["entity_id"]
     df_messages["archive_date"] = chat["end_time"].to_iso8601_string()
-    df_messages["is_broadcast"] = chat["is_broadcast"]
-    df_messages["is_megagroup"] = chat["is_megagroup"]
-    df_messages["is_gigagroup"] = chat["is_gigagroup"]
-    df_messages["participants_count"] = chat["participants_count"]
 
     # Build the S3 file path
     storage_location = os.getenv('STORAGE_LOCATION', 's3://tietl')
@@ -177,7 +179,46 @@ async def init_telegram_client():
     return client
 
 
-async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, download_location="telegram_downloads", download_files=False, download_rules=None):
+def archive_file(local_path, file_name, file_size, mime_type, file_hash, source_data, archive_date, source_date, download_location="telegram_downloads"):
+    fs = get_fs()
+
+    # Build S3 path
+    storage_location = os.getenv('STORAGE_LOCATION', 's3://tietl')
+    s3_dir = f"{storage_location.rstrip('/')}/{download_location.rstrip('/')}/{file_hash}"
+    s3_file_path = f"{s3_dir}/file/{file_name}"
+    s3_source_file_path = f"{s3_dir}/source_{archive_date.to_iso8601_string()}.json"
+
+    # Check if already exists in S3
+    first_download = False
+    if not fs.exists(s3_dir):
+        print(f"Uploading to {s3_file_path}")
+        with fs.open(s3_file_path, "wb") as f:
+            with open(local_path, "rb") as lf:
+                shutil.copyfileobj(lf, f)
+                first_download = True
+    else:
+        print(f"Skipping upload, already exists in {s3_dir}")
+
+    source_json = {
+        "file_hash": file_hash,
+        "file_name": file_name,
+        "file_size_bytes": file_size,
+        "mime_type": mime_type,
+        "source_type": "telegram_message",
+        "source_date": source_date.isoformat(),
+        "archive_date": archive_date.to_iso8601_string(),
+        "source_data": source_data,
+        "first_download": first_download
+    }
+
+    with fs.open(s3_source_file_path, "w") as f:
+        json.dump(source_json, f, indent=2)
+
+    print(f"Uploaded source JSON to {s3_source_file_path}")
+    return s3_source_file_path
+
+
+async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, download_files=False, download_rules=None, existing_downloads=None):
     
     # If downloads true, make sure fs is set
     if download_files and fs is None:
@@ -187,6 +228,8 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
     chat = await client.get_entity(chat_entity_id)
 
     chat_history = []  # store messages for export
+    source_files = []
+    filtered_existing_downloads = None
 
     async for message in client.iter_messages(chat, reverse=True, offset_date=start_time):
         if not (start_time <= pendulum.instance(message.date) < end_time):
@@ -205,13 +248,30 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
         except Exception:
             fwd_from_entity = None
 
-        file_hash = None
-        msg_summary = None
-        local_path = None
 
+        local_path = None
+        
         try:
-            if download_files and message.file and getattr(message.file, "name", None):
-                if _should_download(message, from_entity, download_rules):
+            if (download_files
+                and message.file
+                and getattr(message.file, "name", None)
+                and _should_download(message, from_entity, download_rules)):
+
+                if existing_downloads is not None and not existing_downloads.empty:
+
+                    print("Checking existing downloads for matches...")
+
+                    filtered_existing_downloads = existing_downloads[
+                        (existing_downloads['file_name'] == message.file.name) &
+                        (existing_downloads['mime_type'] == message.file.mime_type) &
+                        (existing_downloads['file_size_bytes'] == message.file.size) &
+                        (existing_downloads['source_data'].apply(lambda x: x.get('message_id') == message.id))
+                    ]
+
+                if filtered_existing_downloads is not None and not filtered_existing_downloads.empty:
+                    print(f"Skipping download. Found existing download for {message.file.name}:")
+                else:
+
                     print(f"Found media '{message.file.name}', starting fast download...")
                     progress_msg = await client.send_message("me", "Starting…")
                     local_path = await fast_download(
@@ -226,42 +286,16 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
                     file_hash = sha256sum(local_path)
 
                     # Create message summary
-                    msg_summary = create_message_summary(message, from_entity, fwd_from_entity, file_hash=file_hash)
+                    msg_summary = create_message_summary(message, chat, chat_entity_id, from_entity, fwd_from_entity, file_hash)
 
-                    # Build S3 path
-                    storage_location = os.getenv('STORAGE_LOCATION', 's3://tietl')
-                    s3_dir = f"{storage_location.rstrip('/')}/{download_location.rstrip('/')}/{file_hash}"
-                    s3_file_path = f"{s3_dir}/file/{message.file.name}"
-                    s3_source_file_path = f"{s3_dir}/source_{message.date.isoformat()}.json"
-
-                    # Check if already exists in S3
-                    first_download = False
-                    if not fs.exists(s3_dir):
-                        print(f"Uploading to {s3_file_path}")
-                        with fs.open(s3_file_path, "wb") as f:
-                            with open(local_path, "rb") as lf:
-                                shutil.copyfileobj(lf, f)
-                                first_download = True
-                    else:
-                        print(f"Skipping upload, already exists in {s3_dir}")
-
-                    source_json = {
-                        "file_hash": file_hash,
-                        "file_name": getattr(message.file, "name", None),
-                        "file_size_bytes": getattr(message.file, "size", None),
-                        "mime_type": getattr(message.file, "mime_type", None),
-                        "source_type": "telegram_message",
-                        "source_date": message.date.isoformat(),
-                        "source_data": msg_summary,
-                        "first_download": first_download
-                    }
-
-                    with fs.open(s3_source_file_path, "w") as f:
-                        json.dump(source_json, f, indent=2)
-                    print(f"Uploaded source JSON to {s3_source_file_path}")
+                    # Archive downloads
+                    source_file = archive_file(local_path, message.file.name, message.file.size, message.file.mime_type, file_hash, msg_summary, archive_date=end_time, source_date=message.date)
+                    source_files.append(source_file)
 
                     # Cleanup local file
                     os.remove(local_path)
+            else: 
+                msg_summary = create_message_summary(message, chat, chat_entity_id, from_entity, fwd_from_entity, file_hash=None)
 
         except Exception as e:  # catch anything that goes wrong during download
             print(f"Error downloading file: {e}")
@@ -270,7 +304,7 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
             if local_path and os.path.exists(local_path):
                 os.remove(local_path)
 
-        chat_history.append(create_message_summary(message, from_entity, fwd_from_entity, file_hash))
+        chat_history.append(msg_summary)
 
     return {
         "start_time": start_time,
@@ -279,11 +313,8 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
         "chat_id": chat.id,
         "entity_id": chat_entity_id,
         "chat_type": type(chat).__name__,
-        "is_broadcast": getattr(chat, "broadcast", False),
-        "is_megagroup": getattr(chat, "megagroup", False),
-        "is_gigagroup": getattr(chat, "gigagroup", False),
-        "participants_count": getattr(chat, "participants_count", None),
-        "chat_history": chat_history
+        "chat_history": chat_history,
+        "source_files": source_files
     }
 
 

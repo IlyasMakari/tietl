@@ -1,3 +1,5 @@
+import json
+from importlib_metadata import files
 import pendulum
 from airflow.decorators import dag, task
 from pendulum import datetime
@@ -12,7 +14,7 @@ from airflow.exceptions import AirflowSkipException
 
 from include.filesystem import get_fs
 from include.telegram.telegram_scraper import scrape_messages, create_chat_archive, list_chat_archives
-from include.elasticsearch.elasticsearch import create_index_if_not_exists, bulk_insert
+from include.elasticsearch.elasticsearch import create_index_if_not_exists, bulk_insert, query_index
 
 import re
 import yaml
@@ -57,7 +59,31 @@ def create_telegram_dag(dag_id, config):
 
             # Scrape messages from the Telegram chat
             try:
-                chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date, fs=get_fs(), download_files=enable_downloads, download_rules=download_rules))
+
+                query = {
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"term": {"source_data.chat_type": chat_type}},
+                                {"term": {"source_data.chat_id": chat_id}}
+                            ],
+                            "filter": [
+                                {
+                                    "range": {
+                                        "source_date": {
+                                            "gte": previous_task_date.to_iso8601_string(),
+                                            "lte": logical_date.to_iso8601_string()
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+
+                chat_files_df = query_index("file_sources", query)
+
+                chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date, fs=get_fs(), download_files=enable_downloads, download_rules=download_rules, existing_downloads=chat_files_df))
                 print("Scraping succeeded!")
 
             except InviteHashExpiredError as e:
@@ -88,6 +114,7 @@ def create_telegram_dag(dag_id, config):
 
             return {
                 "parquet_files": parquet_files,
+                "source_files": chat.get("source_files", []),
                 "logical_date": logical_date,
                 "previous_task_date": previous_task_date
             }
@@ -96,11 +123,14 @@ def create_telegram_dag(dag_id, config):
         @task()
         def save_to_elasticsearch(data):
 
+            fs = get_fs()
+
             parquet_files = data["parquet_files"]
+            source_files = data["source_files"]
             logical_date = data["logical_date"]
             previous_task_date = data["previous_task_date"]
 
-            df = pd.read_parquet(parquet_files, engine="pyarrow", filesystem=get_fs())
+            df = pd.read_parquet(parquet_files, engine="pyarrow", filesystem=fs)
 
             # print dataframe info
             print(f"Dataframe length: {len(df)}")
@@ -113,7 +143,7 @@ def create_telegram_dag(dag_id, config):
             # Deduplicate based on chat_type, chat_id, id keeping the latest archive_date
             df["archive_date"] = pd.to_datetime(df["archive_date"], utc=True, format='ISO8601')
             df = df.sort_values(by="archive_date", ascending=False)
-            latest_archive_idx = df.groupby(["chat_type", "chat_id", "id"])["archive_date"].idxmax()
+            latest_archive_idx = df.groupby(["chat_type", "chat_id", "message_id"])["archive_date"].idxmax()
             df = df.loc[latest_archive_idx].reset_index(drop=True)
             print(f"Dataframe length after deduplication: {len(df)}")
 
@@ -121,19 +151,33 @@ def create_telegram_dag(dag_id, config):
             df["es_logical_save_date"] = logical_date.to_iso8601_string()
             df["es_save_date"] = pendulum.now("UTC").to_iso8601_string()
 
-            # Add the _id field for Elasticsearch based on chat_type, chat_id, id
-            df["_id"] = df.apply(lambda row: f"{row['chat_type']}_{row['chat_id']}_{row['id']}", axis=1)
+            # Add the _id field for Elasticsearch based on chat_type, chat_id, message_id
+            df["_id"] = df.apply(lambda row: f"{row['chat_type']}_{row['chat_id']}_{row['message_id']}", axis=1)
 
-            # Create index if it doesn't exist
-            index_name = "telegram_messages"
-            mapping_file = "/usr/local/airflow/include/elasticsearch/mappings/telegram_messages.json"
-            create_index_if_not_exists(index_name, mapping_file)
-
+            # Fix nan values
             for col in ['fwd_from_id', 'file_size_bytes', 'reply_to_msg_id', 'fwd_from_channel_post']:
                 df[col] = df[col].astype('Int64')  # nullable integer type
 
-            # Bulk insert into Elasticsearch
-            bulk_insert(df, index_name=index_name, id_field="_id")
+            # Insert into Elasticsearch
+            create_index_if_not_exists(index_name="telegram_messages", mapping_file="/usr/local/airflow/include/elasticsearch/mappings/telegram_messages.json")
+            bulk_insert(df, index_name="telegram_messages", id_field="_id")
+
+            # Save file sources to Elasticsearch
+            if source_files:
+                source_json_list = []
+                for f in source_files:
+                    with fs.open(f, "r") as fp:
+                        data = json.load(fp)
+                        source_json_list.append(pd.DataFrame([data]))
+                sources_df = pd.concat(source_json_list, ignore_index=True)
+
+                # Add the _id field for Elasticsearch
+                sources_df["_id"] = sources_df["source_data"].map(lambda d: f"telegram_message_{d['file_hash']}_{d['chat_type']}_{d['chat_id']}_{d['message_id']}")
+
+                # Insert into Elasticsearch
+                create_index_if_not_exists(index_name="file_sources", mapping_file="./include/elasticsearch/mappings/file_sources.json")
+                bulk_insert(sources_df, index_name="file_sources", id_field="_id")
+
 
         # DAG flow
         archive_data = fetch_and_archive_messages()

@@ -59,3 +59,22 @@ def bulk_insert(df: pd.DataFrame, index_name: str, id_field="_id"):
                 reason = details.get('error', {}).get('reason')
                 print(f"Failed doc ID {doc_id}: {reason}")
     print(f"{len(actions)} records inserted into '{index_name}'")
+
+
+def query_index(index_name: str, query: dict, size: int = 10000) -> pd.DataFrame:
+    """
+    Query an Elasticsearch index and return results as a Pandas DataFrame.
+    """
+    es = _get_es_instance()
+    
+    try:
+        response = es.search(index=index_name, body=query, size=size)
+        hits = response.get('hits', {}).get('hits', [])
+        if not hits:
+            return pd.DataFrame()  # Return empty DataFrame if no results
+        # Extract _source and _id for each hit
+        data = [{**hit['_source'], '_id': hit['_id']} for hit in hits]
+        return pd.DataFrame(data)
+    except Exception as e:
+        print(f"Error querying index '{index_name}': {e}")
+        return pd.DataFrame()
