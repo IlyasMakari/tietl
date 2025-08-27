@@ -13,7 +13,7 @@ import sys
 from airflow.exceptions import AirflowSkipException
 
 from include.filesystem import get_fs
-from include.telegram.telegram_scraper import scrape_messages, create_chat_archive, list_chat_archives
+from include.telegram.telegram_scraper import scrape_messages, create_chat_archive, list_chat_archives, list_file_sources
 from include.elasticsearch.elasticsearch import create_index_if_not_exists, bulk_insert, query_index
 
 import re
@@ -57,31 +57,30 @@ def create_telegram_dag(dag_id, config):
             logical_date = kwargs['logical_date']
             previous_task_date = logical_date.subtract(days=1)
 
-            # Scrape messages from the Telegram chat
-            try:
-
-                query = {
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"source_data.chat_type": chat_type}},
-                                {"term": {"source_data.chat_id": chat_id}}
-                            ],
-                            "filter": [
-                                {
-                                    "range": {
-                                        "source_date": {
-                                            "gte": previous_task_date.to_iso8601_string(),
-                                            "lte": logical_date.to_iso8601_string()
-                                        }
+            # Get previously downloaded files for this dag run
+            chat_files_df = query_index("file_sources", {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"source_data.chat_type": chat_type}},
+                            {"term": {"source_data.chat_id": chat_id}}
+                        ],
+                        "filter": [
+                            {
+                                "range": {
+                                    "source_date": {
+                                        "gte": previous_task_date.to_iso8601_string(),
+                                        "lte": logical_date.to_iso8601_string()
                                     }
                                 }
-                            ]
-                        }
+                            }
+                        ]
                     }
                 }
+            })
 
-                chat_files_df = query_index("file_sources", query)
+            # Scrape messages from the Telegram chat
+            try:
 
                 chat = asyncio.run(scrape_messages(chat_entity, start_time=previous_task_date, end_time=logical_date, fs=get_fs(), download_files=enable_downloads, download_rules=download_rules, existing_downloads=chat_files_df))
                 print("Scraping succeeded!")
@@ -98,8 +97,16 @@ def create_telegram_dag(dag_id, config):
                 print(f"Found {len(parquet_files)} archived files matching the criteria.")
                 print(f"Parquet files: {parquet_files}")
                 if parquet_files:
+
+                    source_files = []
+                    download_hashes = chat_files_df["file_hash"].unique()
+                    for hash in download_hashes:
+                        source_files.extend(list_file_sources(hash=hash, start_date=previous_task_date, end_date=logical_date))
+                    print(f"Found {len(source_files)} source files matching the criteria.")
+
                     return {
                         "parquet_files": parquet_files,
+                        "source_files": source_files,
                         "logical_date": logical_date,
                         "previous_task_date": previous_task_date
                     }
@@ -159,7 +166,7 @@ def create_telegram_dag(dag_id, config):
                 df[col] = df[col].astype('Int64')  # nullable integer type
 
             # Insert into Elasticsearch
-            create_index_if_not_exists(index_name="telegram_messages", mapping_file="/usr/local/airflow/include/elasticsearch/mappings/telegram_messages.json")
+            create_index_if_not_exists(index_name="telegram_messages", mapping_file="./include/elasticsearch/mappings/telegram_messages.json")
             bulk_insert(df, index_name="telegram_messages", id_field="_id")
 
             # Save file sources to Elasticsearch

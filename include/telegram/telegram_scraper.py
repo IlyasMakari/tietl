@@ -346,3 +346,33 @@ def list_chat_archives(chat_type: str, chat_id: int, start_date: pendulum.DateTi
             matching_files.append(full_path)
 
     return matching_files
+
+
+
+def list_file_sources(hash: str, start_date: pendulum.DateTime, end_date: pendulum.DateTime, file_location: str = "telegram_downloads"):
+
+    storage_location = os.getenv('STORAGE_LOCATION', 's3://tietl')
+    base_path = f"{storage_location.rstrip('/')}/{file_location.rstrip('/')}/{hash}"
+    fs = get_fs()
+    files = fs.ls(base_path)
+
+    pattern = re.compile(
+        rf"source_(.+?)Z\.json$"
+    )
+
+    matching_files = []
+    for f in files:
+        fname = f.split("/")[-1]
+        m = pattern.match(fname)
+        if not m:
+            continue
+
+        file_end_str = m.groups()
+        file_end = pendulum.parse(file_end_str[0] + "Z")
+
+        # Check if file_end is between start_date and end_date
+        if file_end >= start_date and file_end <= end_date:
+            full_path = f"{base_path}/{fname}"
+            matching_files.append(full_path)
+
+    return matching_files
