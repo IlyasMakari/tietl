@@ -1,48 +1,104 @@
-docker-compose run --rm test /bin/bash
+# TIETL — Threat Intelligence ETL Framework
+
+TIETL is an **open source Cyber Threat Intelligence ETL framework**
+built on top of [Apache Airflow](https://airflow.apache.org/).\
+It enables collection of cyber threat intelligence (CTI) from various
+sources such as **Telegram chatrooms** and **combolists**, and provides
+a flexible YAML-based configuration system for defining ETL pipelines with low or no code.
+
+TIETL comes with with **Elasticsearch** for powerful querying and
+search, and uses **Kibana** for data visualization, analysis, and
+reporting.
+
+![Tietl Architecture](https://github.com/IlyasMakari/tietl/blob/main/tietl-architecture.png?raw=true)
+
+## Features
+
+-   Collect CTI data from **Telegram**, combolists, and other online
+    sources
+-   Define ETL pipelines using simple **YAML files**
+-   Store and query CTI in **Elasticsearch**
+-   Analyze and visualize CTI with **Kibana dashboards**
+-   Local testing setup with **Docker + Minio (S3 alternative)**
+-   Automated and orchestrated with **Apache Airflow**
 
 
-Overview
-========
+## Installation
 
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+### Requirements
 
-Project Contents
-================
+-   [Docker](https://docs.docker.com/get-docker/)
+-   [Astro CLI](https://www.astronomer.io/docs/astro/cli/install-cli)
 
-Your Astro project contains the following files and folders:
+### Setup
 
-- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
-    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
-- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
-- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
-- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
-- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
-- plugins: Add custom or community plugins for your project to this file. It is empty by default.
-- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+``` bash
+git clone https://github.com/IlyasMakari/tietl.git
+```
 
-Deploy Your Project Locally
-===========================
+1.  Fill in your **Telegram API key** in the `.env` file
+2.  Configure your **Elasticsearch** connection in the `.env` file
+3.  Configure your **S3/Minio endpoint** in the `.env` file
 
-Start Airflow on your local machine by running 'astro dev start'.
+For **local testing**, TIETL comes with a Docker setup under `/servers`
+that launches local servers:
+- Minio (S3 alternative)
+- Elasticsearch
+- Kibana
 
-This command will spin up five Docker containers on your machine, each for a different Airflow component:
 
-- Postgres: Airflow's Metadata Database
-- Scheduler: The Airflow component responsible for monitoring and triggering tasks
-- DAG Processor: The Airflow component responsible for parsing DAGs
-- API Server: The Airflow component responsible for serving the Airflow UI and API
-- Triggerer: The Airflow component responsible for triggering deferred tasks
+### Telegram Setup
 
-When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+To scrape data from Telegram, add a **Telethon session** named
+`tietl.session` inside the `telethon_sessions/` folder.
 
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
 
-Deploy Your Project to Astronomer
-=================================
+## Running TIETL
 
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+Start the project with:
 
-Contact
-=======
+``` bash
+astro dev start
+```
 
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+Once running, access the **Airflow UI** at:
+👉 <http://localhost:8080>
+
+From here, you can monitor, trigger, and manage your ETL pipelines.
+
+## Creating ETL Pipelines
+
+TIETL allows you to define ETL pipelines using YAML files. This makes it easy to scrape data from Telegram chatrooms, download files, and apply custom rules to determine which files should be downloaded and analyzed.
+
+### Example: `dags/telegram_chats/alien_cloud.yaml`
+
+```yaml
+txt_alien:
+  default_args:
+    retries: 0
+  start_date: "2023-01-01"
+  schedule_interval: "@daily"
+  catchup: false
+  tags: ["telegram", "infostealer", "chatrooms"]
+  chat_info:
+    chat_name: "alien"
+    chat_entity: "t.me/+VwOmy2CzcjsxMjBh"
+    chat_type: "Channel"
+    chat_id: "2429498260"
+  enable_downloads: True
+  download_rules:
+    allowed_mime_types: ["text/plain"]
+```
+
+This example shows how to:  
+- Define the **chat** to scrape from (`chat_info`)  
+- Schedule a daily ETL run (`schedule_interval`)  
+- Enable downloading of files (`enable_downloads`)  
+- Apply **download rules** to filter files by MIME type  
+
+You can create similar YAML files for other Telegram channels to extend your CTI pipelines.
+
+
+## 📜 License
+
+This project is licensed under the **AGPLv3**.
