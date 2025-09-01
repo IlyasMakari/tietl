@@ -9,3 +9,7 @@ s3fs
 pyarrow
 pandas
 dask
+regex
+validators
+tldextract
+email-validator
