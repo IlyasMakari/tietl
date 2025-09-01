@@ -1,5 +1,7 @@
 import json
 import pandas as pd
+import dask.dataframe as dd
+from dask import delayed, compute
 from elasticsearch import Elasticsearch, helpers
 from elasticsearch.helpers import BulkIndexError
 import os
@@ -38,28 +40,53 @@ def create_index_if_not_exists(index_name: str, mapping_file: str):
     else:
         print(f"Index '{index_name}' already exists")
 
-def bulk_insert(df: pd.DataFrame, index_name: str, id_field="_id"):
-    """Bulk insert a Pandas DataFrame into Elasticsearch"""
+
+def bulk_insert(df, index_name: str, id_field="_id"):
+    """Bulk insert a Pandas or Dask DataFrame into Elasticsearch"""
+    create_index_if_not_exists(
+        index_name=index_name,
+        mapping_file=f"./include/elasticsearch/mappings/{index_name}.json"
+    )
+
+    if isinstance(df, pd.DataFrame):
+        return _insert_pandas(df, index_name, id_field)
+    elif isinstance(df, dd.DataFrame):
+        return _insert_dask(df, index_name, id_field)
+    else:
+        raise TypeError(f"Unsupported DataFrame type: {type(df)}")
+    
+
+def _insert_pandas(df: pd.DataFrame, index_name: str, id_field="_id"):
     es = _get_es_instance()
-
-    # Convert DataFrame to list of actions
-    actions = []
-    for _, row in df.iterrows():
-        row_dict = row.to_dict()
-        row_dict.pop(id_field, None)  # Remove id field from source
-        actions.append({"_index": index_name, "_id": row[id_field], "_source": row_dict})
-
+    actions = [
+        {"_index": index_name, "_id": row[id_field], "_source": {k: v for k, v in row.items() if k != id_field}}
+        for _, row in df.iterrows()
+    ]
     try:
         helpers.bulk(es, actions)
     except BulkIndexError as e:
-        # e.errors is a list of failed items
         for item in e.errors:
-            for op_type, details in item.items():
+            for _, details in item.items():
                 doc_id = details.get('_id')
                 reason = details.get('error', {}).get('reason')
                 print(f"Failed doc ID {doc_id}: {reason}")
     print(f"{len(actions)} records inserted into '{index_name}'")
 
+
+def _insert_partition(partition: pd.DataFrame, index_name: str, id_field="_id"):
+    es = _get_es_instance()
+    actions = (
+        {"_index": index_name, "_id": row[id_field], "_source": {k: v for k, v in row.items() if k != id_field}}
+        for _, row in partition.iterrows()
+    )
+    helpers.bulk(es, actions)
+
+
+def _insert_dask(df: dd.DataFrame, index_name: str, id_field="_id"):
+    tasks = [delayed(_insert_partition)(part, index_name, id_field) for part in df.to_delayed()]
+    compute(*tasks)
+    print(f"Inserted data from Dask DataFrame into '{index_name}'")
+    
 
 def query_index(index_name: str, query: dict, size: int = 10000) -> pd.DataFrame:
     """

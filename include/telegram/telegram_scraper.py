@@ -270,6 +270,10 @@ async def scrape_messages(chat_entity_id, start_time, end_time, fs=None, downloa
 
                 if filtered_existing_downloads is not None and not filtered_existing_downloads.empty:
                     print(f"Skipping download. Found existing download for {message.file.name}:")
+
+                    # Create message summary
+                    file_hash = filtered_existing_downloads.iloc[0]['file_hash']
+                    msg_summary = create_message_summary(message, chat, chat_entity_id, from_entity, fwd_from_entity, file_hash)
                 else:
 
                     print(f"Found media '{message.file.name}', starting fast download...")

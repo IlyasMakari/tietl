@@ -13,3 +13,6 @@ txt_alien:
   enable_downloads: True
   download_rules:
     allowed_mime_types: ["text/plain"]
+  download_handlers:
+    - yara: "alientxt_ulp.yar"
+      run: "tools/ulp_parser/ulp_parser_cli.py --input \"$file_path\" --output-folder \"$output_path\" --file-hash \"$file_hash\" --max-fail-percent 5.0 --chunk-size 200000"

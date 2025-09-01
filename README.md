@@ -16,7 +16,7 @@ reporting.
 
 -   Collect CTI data from **Telegram**, combolists, and other online
     sources
--   Define ETL pipelines using simple **YAML files**
+-   Define ETL pipelines using simple **YAML files** and **YARA rules**
 -   Store and query CTI in **Elasticsearch**
 -   Analyze and visualize CTI with **Kibana dashboards**
 -   Local testing setup with **Docker + Minio (S3 alternative)**
@@ -88,13 +88,17 @@ txt_alien:
   enable_downloads: True
   download_rules:
     allowed_mime_types: ["text/plain"]
+  download_handlers:
+    - yara: "alientxt_ulp.yar"
+      run: "tools/ulp_parser/ulp_parser_cli.py --input \"$file_path\" --output-folder \"$output_path\" --file-hash \"$file_hash\" --max-fail-percent 5.0 --chunk-size 200000"
 ```
 
 This example shows how to:  
 - Define the **chat** to scrape from (`chat_info`)  
 - Schedule a daily ETL run (`schedule_interval`)  
 - Enable downloading of files (`enable_downloads`)  
-- Apply **download rules** to filter files by MIME type  
+- Apply **download rules** to filter files by MIME type
+- Apply **file hander** to parse files based on YARA rules
 
 You can create similar YAML files for other Telegram channels to extend your CTI pipelines.
 
